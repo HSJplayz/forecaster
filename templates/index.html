@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>forecaster</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --ink:#e6e8ee; --muted:#9aa0ad;
+    --accent:#4f8cff; --good:#3fb950; --warn:#f0b429; --bad:#f85149; --line:#262b36; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif; padding:28px; }
+  main { max-width:1080px; margin:0 auto; }
+  h1 { font-size:1.6rem; margin:0 0 4px; }
+  h2 { font-size:1.1rem; border-bottom:1px solid var(--line); padding-bottom:6px; margin:26px 0 12px; }
+  .muted { color:var(--muted); font-size:.86rem; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-top:16px; }
+  label { display:block; font-size:.84rem; color:var(--muted); margin:10px 0 4px; }
+  textarea, input, select { width:100%; background:var(--bg); color:var(--ink);
+    border:1px solid var(--line); border-radius:8px; padding:8px; font:inherit; }
+  textarea { min-height:130px; font-family:ui-monospace,Consolas,monospace; font-size:.78rem; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
+  .row > div { flex:1; min-width:120px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 18px;
+    font-weight:600; font-size:.95rem; cursor:pointer; margin-top:14px; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px; }
+  .card .n { font-size:1.2rem; font-weight:700; }
+  table { width:100%; border-collapse:collapse; font-size:.86rem; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; }
+  .err { color:var(--bad); background:var(--card); border:1px solid var(--bad); border-radius:8px; padding:10px; margin-top:12px; }
+  #loading { display:none; color:var(--warn); margin-top:12px; }
+  svg { width:100%; height:auto; background:var(--bg); border:1px solid var(--line); border-radius:10px; }
+  .chk { display:flex; align-items:center; gap:6px; margin-top:22px; }
+  .legend { display:flex; gap:16px; font-size:.8rem; color:var(--muted); margin:4px 0 8px; }
+  .legend span::before { content:""; display:inline-block; width:12px; height:3px; margin-right:5px; vertical-align:middle; }
+  .lh::before { background:#9aa0ad; } .lf::before { background:#4f8cff; } .lp::before { background:#3fb950; }
+</style>
+</head>
+<body>
+<main>
+  <h1>forecaster</h1>
+  <p class="muted">Classical time-series forecasting from scratch (numpy): additive decomposition, exponential smoothing / Holt-Winters, and AR models, with ACF/PACF and rolling-origin backtesting. Paste a CSV — charts render locally as inline SVG.</p>
+
+  <div class="panel">
+    <label>CSV data (header row required; a sample loads automatically)</label>
+    <textarea id="csv" spellcheck="false"></textarea>
+    <div class="row">
+      <div><label>Value column</label><select id="column"></select></div>
+      <div><label>Model</label><select id="model">
+        <option>holt-winters</option><option>holt</option><option>ses</option>
+        <option>ar</option><option>seasonal-naive</option><option>naive</option>
+        <option>moving-average</option></select></div>
+      <div><label>Period</label><input type="number" id="period" value="12" min="1" max="60"></div>
+      <div><label>Horizon</label><input type="number" id="horizon" value="12" min="1" max="60"></div>
+      <div class="chk"><input type="checkbox" id="compare"><span class="muted">compare models</span></div>
+    </div>
+    <button id="run">Forecast</button>
+    <div id="loading">Fitting…</div>
+    <div id="error"></div>
+  </div>
+
+  <h2>Summary</h2>
+  <div id="cards" class="cards"></div>
+
+  <h2>Series &amp; forecast</h2>
+  <div class="legend"><span class="lh">history</span><span class="lf">fitted</span><span class="lp">forecast (95% band)</span></div>
+  <div id="main"></div>
+
+  <h2>Decomposition</h2>
+  <div id="decomp"></div>
+
+  <h2>Autocorrelation</h2>
+  <p class="muted">Blue = ACF (above axis), amber = PACF (below). Dashed lines are the ±1.96/√n significance bounds.</p>
+  <div id="acfchart"></div>
+
+  <h2>Model comparison (rolling-origin RMSE)</h2>
+  <div id="compare"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function gauss(rng){let u=0,v=0;while(u===0)u=rng();while(v===0)v=rng();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);}
+function sampleData() {
+  const rng = mulberry32(5);
+  const lines = ["month,value"];
+  for (let t=0;t<96;t++){
+    const v = 20 + 0.3*t + 6*Math.sin(2*Math.PI*t/12) + 2*Math.sin(2*Math.PI*t/6) + gauss(rng)*0.7;
+    lines.push(`${t},${v.toFixed(2)}`);
+  }
+  return lines.join("\n");
+}
+$("csv").value = sampleData();
+
+function headers(text){const m=text.match(/^(.*?)\r?\n/);return m?m[1].split(",").map(s=>s.trim()).filter(Boolean):[];}
+function refreshColumns(){
+  const cols = headers($("csv").value);
+  $("column").innerHTML = cols.map(c=>`<option>${c}</option>`).join("");
+}
+$("csv").addEventListener("input", refreshColumns);
+refreshColumns();
+
+function esc(s){return String(s).replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));}
+function svg(w,h,inner){return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${inner}</svg>`;}
+
+$("run").addEventListener("click", async () => {
+  const btn = $("run");
+  btn.disabled = true; $("loading").style.display = "block"; $("error").innerHTML = "";
+  const body = {
+    csv: $("csv").value, column: $("column").value, model: $("model").value,
+    period: parseInt($("period").value,10)||1, horizon: parseInt($("horizon").value,10)||12,
+    compare: $("compare").checked
+  };
+  try {
+    const res = await fetch("/api/forecast", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "forecast failed");
+    render(data);
+  } catch (err) {
+    $("error").innerHTML = `<div class="err">${esc(err.message)}</div>`;
+  } finally {
+    btn.disabled = false; $("loading").style.display = "none";
+  }
+});
+
+function render(d) {
+  const ov = d.overview;
+  const cards = [["Model", ov.model], ["Rows", ov.rows], ["Period", ov.period],
+    ["Horizon", ov.horizon], ["Residual σ", ov.residual_std.toFixed(3)]];
+  if (d.decomposition) {
+    cards.push(["Seasonal str.", d.decomposition.seasonal_strength.toFixed(3)]);
+    cards.push(["Trend str.", d.decomposition.trend_strength.toFixed(3)]);
+  }
+  if (d.smoothing) cards.push(["α / β / γ", Object.values(d.smoothing).map(v=>v.toFixed(2)).join(" / ")]);
+  if (d.ar_order) cards.push(["AR order", d.ar_order]);
+  $("cards").innerHTML = cards.map(([k,v])=>`<div class="card"><div class="muted">${k}</div><div class="n">${esc(v)}</div></div>`).join("");
+
+  $("main").innerHTML = mainChart(d);
+  $("decomp").innerHTML = d.decomposition ? decompChart(d) : `<p class="muted">Set period ≥ 2 to see the decomposition.</p>`;
+  $("acfchart").innerHTML = acfChart(d);
+  $("compare").innerHTML = d.comparison ? compareTable(d.comparison) : `<p class="muted">Tick "compare models" to rank all methods by rolling-origin RMSE.</p>`;
+}
+
+function linePath(pts, xat, yat) {
+  let path = "", pen = false;
+  for (const [i,v] of pts) {
+    if (v === null || v === undefined) { pen = false; continue; }
+    path += (pen ? " L" : " M") + xat(i).toFixed(1) + " " + yat(v).toFixed(1);
+    pen = true;
+  }
+  return path;
+}
+
+function mainChart(d) {
+  const W=940,H=340,PADL=44,PADR=14,PADT=14,PADB=26;
+  const n=d.n_train, h=d.forecast.length, T=n+h;
+  const all=[...d.history,...d.forecast,...d.lo95,...d.hi95].filter(v=>v!==null);
+  const vmin=Math.min(...all), vmax=Math.max(...all), span=(vmax-vmin)||1;
+  const xat=i=>PADL+i/(T-1)*(W-PADL-PADR);
+  const yat=v=>H-PADB-(v-vmin)/span*(H-PADT-PADB);
+  // axes gridlines
+  let inner=`<line x1="${PADL}" y1="${H-PADB}" x2="${W-PADR}" y2="${H-PADB}" stroke="#3a4252"/>`;
+  for (let g=0;g<=4;g++){ const v=vmin+span*g/4, y=yat(v);
+    inner+=`<line x1="${PADL}" y1="${y.toFixed(1)}" x2="${W-PADR}" y2="${y.toFixed(1)}" stroke="#1d2230"/>
+            <text x="${PADL-6}" y="${(y+3).toFixed(1)}" text-anchor="end" fill="#9aa0ad" font-size="10">${v.toFixed(1)}</text>`; }
+  // 95% band polygon from last history point through forecast
+  const bandIdx=[n-1, ...Array.from({length:h},(_,k)=>n+k)];
+  const bandVals=[d.history[n-1], ...d.lo95];
+  const bandHi=[d.history[n-1], ...d.hi95];
+  let poly = bandIdx.map((i,k)=>`${xat(i).toFixed(1)},${yat(bandHi[k]).toFixed(1)}`).join(" ")
+           + " " + bandIdx.map((i,k)=>`${xat(i).toFixed(1)},${yat(bandVals[k]).toFixed(1)}`).reverse().join(" ");
+  inner += `<polygon points="${poly}" fill="#3fb950" opacity="0.14"/>`;
+  // fitted
+  inner += `<path d="${linePath(d.fitted.map((v,i)=>[i,v]),xat,yat)}" stroke="#4f8cff" stroke-width="1.6" fill="none"/>`;
+  // history
+  inner += `<path d="${linePath(d.history.map((v,i)=>[i,v]),xat,yat)}" stroke="#9aa0ad" stroke-width="1.8" fill="none"/>`;
+  // forecast (connect from last history point)
+  const fpts=[[n-1,d.history[n-1]],...d.forecast.map((v,k)=>[n+k,v])];
+  inner += `<path d="${linePath(fpts,xat,yat)}" stroke="#3fb950" stroke-width="2.2" fill="none"/>`;
+  // forecast point markers
+  inner += d.forecast.map((v,k)=>`<circle cx="${xat(n+k).toFixed(1)}" cy="${yat(v).toFixed(1)}" r="2.4" fill="#3fb950"/>`).join("");
+  return svg(W,H,inner);
+}
+
+function decompChart(d) {
+  const W=940,H=190,PADL=44,PADR=14,PADT=12,PADB=22;
+  const parts=[{label:"trend", data:d.decomposition.trend, color:"#4f8cff"},
+               {label:"seasonal", data:d.decomposition.seasonal, color:"#f0b429"}];
+  const n=parts[0].data.length;
+  const xat=i=>PADL+i/(n-1)*(W-PADL-PADR);
+  let inner="", y0=PADT, rowH=(H-PADT-PADB)/2;
+  parts.forEach((part,ri) => {
+    const vals=part.data.filter(v=>v!==null);
+    const lo=Math.min(...vals), hi=Math.max(...vals), span=(hi-lo)||1;
+    const base=y0+ri*rowH+rowH-6, top=y0+ri*rowH+4;
+    const yat=v=>base-(v-lo)/span*(base-top);
+    inner+=`<text x="${PADL-6}" y="${(base+3).toFixed(1)}" text-anchor="end" fill="${part.color}" font-size="10">${part.label}</text>`;
+    inner+=`<path d="${linePath(part.data.map((v,i)=>[i,v]),xat,yat)}" stroke="${part.color}" stroke-width="1.6" fill="none"/>`;
+    inner+=`<line x1="${PADL}" y1="${base.toFixed(1)}" x2="${W-PADR}" y2="${base.toFixed(1)}" stroke="#1d2230"/>`;
+  });
+  return svg(W,H,inner);
+}
+
+function acfChart(d) {
+  const W=940,H=220,PADL=44,PADR=14,MID=(H)/2;
+  const a=d.acf, p=d.pacf, n=a.length;
+  const xat=i=>PADL+i/(n-1)*(W-PADL-PADR);
+  const half=H/2-18, amp=Math.max(...a.map(Math.abs), ...p.map(Math.abs), 0.1);
+  const yUp=v=>MID-v/amp*half, yDn=v=>MID-v/amp*half;
+  const bw=Math.max(2,(W-PADL-PADR)/n*0.4);
+  let inner=`<line x1="${PADL}" y1="${MID}" x2="${W-PADR}" y2="${MID}" stroke="#3a4252"/>`;
+  const n_=parseInt(d.overview.rows,10);
+  const bound=1.96/Math.sqrt(n_);
+  [bound,-bound].forEach(b=>{ const y=yUp(b);
+    inner+=`<line x1="${PADL}" y1="${y.toFixed(1)}" x2="${W-PADR}" y2="${y.toFixed(1)}" stroke="#f85149" stroke-dasharray="4 4" opacity="0.6"/>`; });
+  a.forEach((v,i)=>{ if(i===0) return; const x=xat(i);
+    inner+=`<rect x="${(x-bw/2).toFixed(1)}" y="${Math.min(MID,yUp(v)).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.abs(yUp(v)-MID).toFixed(1)}" fill="#4f8cff"/>`; });
+  p.forEach((v,i)=>{ if(i===0) return; const x=xat(i);
+    inner+=`<rect x="${(x-bw/2).toFixed(1)}" y="${MID.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.abs(yDn(v)-MID).toFixed(1)}" fill="#f0b429"/>`; });
+  for (let i=0;i<n;i+=Math.ceil(n/12)) inner+=`<text x="${xat(i).toFixed(1)}" y="${H-4}" text-anchor="middle" fill="#9aa0ad" font-size="10">${i}</text>`;
+  return svg(W,H,inner);
+}
+
+function compareTable(rows) {
+  const cols=["model","mae","rmse","mape","mase"];
+  const head=`<tr>${cols.map(c=>`<th>${c.toUpperCase()}</th>`).join("")}</tr>`;
+  const body=rows.map((r,i)=>`<tr>${cols.map(c=>{ const v=r[c];
+    const disp = v===null||v===undefined ? "—" : (typeof v==="number"? v.toFixed(3): esc(v));
+    return `<td${i===0&&c==="model"?' style="font-weight:700"':''}>${disp}</td>`; }).join("")}</tr>`).join("");
+  return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+</script>
+</body>
+</html>
